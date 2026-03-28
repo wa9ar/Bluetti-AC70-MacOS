@@ -1,0 +1,15 @@
+mqtt:
+  host: "localhost"       # IP/hostname of your MQTT broker (from Mac host perspective)
+  port: 1883
+  username: ""            # Leave empty if no authentication required
+  password: ""            # Leave empty if no authentication required
+
+bluetti:
+  # Run scan.sh first to get your AC70's Bluetooth address
+  address: "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
+  name: "AC70XXXXXXXXXXXX"    # Exact BLE name as reported by scan.sh (e.g. AC70XXXXXXXXX)
+  polling_interval: 30        # Seconds between each BLE read
+  polling_timeout: 15         # BLE read timeout in seconds
+
+logging:
+  level: "INFO"               # DEBUG, INFO, WARNING, ERROR

@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/
+
+# macOS
+.DS_Store
+
+# Secrets — never commit your config with real credentials
+# config.yaml is tracked as a template (with placeholder values)
+
+# Claude Code internal settings
+.claude/
