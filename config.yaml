@@ -10,6 +10,7 @@ bluetti:
   name: "AC70XXXXXXXXXXXX"    # Exact BLE name as reported by scan.sh (e.g. AC70XXXXXXXXX)
   polling_interval: 30        # Seconds between each BLE read
   polling_timeout: 15         # BLE read timeout in seconds
+  hard_restart_after_failures: 20  # Consecutive BLE read failures before forcing a process restart (launchd KeepAlive picks it back up)
 
 logging:
   level: "INFO"               # DEBUG, INFO, WARNING, ERROR

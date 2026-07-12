@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from decimal import Decimal
 from enum import Enum
@@ -19,6 +20,8 @@ import yaml
 from bleak import BleakScanner
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 from bluetti_bt_lib import build_device, DeviceReader, DeviceReaderConfig, DeviceWriter, recognize_device
+from bluetti_bt_lib.bluetooth.encryption import BluettiEncryption, Message, MessageType
+from bluetti_bt_lib.const import NOTIFY_UUID, WRITE_UUID
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
@@ -223,6 +226,7 @@ class BluettiBridge:
         self.logger = logging.getLogger("BluettiBridge")
         self.lock = asyncio.Lock()
         self._consecutive_failures = 0
+        self._hard_restart_after = self.bt_cfg.get("hard_restart_after_failures", 20)
         self._reader: DeviceReader | None = None
         self._use_encryption: bool | None = None  # detected at startup
 
@@ -301,6 +305,7 @@ class BluettiBridge:
                 "value_template": f"{{{{ value_json.{sel['key']} }}}}",
                 "command_topic": f"{self.cmd_base}/{sel['key']}",
                 "options": sel["options"],
+                "optimistic": True,
                 "availability_topic": self.avail_topic,
                 "device": device,
             }
@@ -374,6 +379,19 @@ class BluettiBridge:
             if self._consecutive_failures >= 3:
                 self.logger.info("Recreating DeviceReader...")
                 self._reader = None
+
+            # Reader recreation alone doesn't always recover a wedged BLE
+            # session (seen stuck for 2+ days). Past this threshold, kill
+            # the process outright — launchd's KeepAlive restarts it with a
+            # clean BLE stack and fresh encryption handshake.
+            if self._consecutive_failures >= self._hard_restart_after:
+                self.logger.critical(
+                    "%d consecutive BLE read failures — forcing process restart",
+                    self._consecutive_failures,
+                )
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os._exit(1)
             return None
 
     # ── BLE write ──────────────────────────────────
@@ -381,13 +399,51 @@ class BluettiBridge:
     async def write_to_device(self, field_name: str, value: Any) -> None:
         """Send a command to the AC70 via BLE."""
         try:
+            if self._use_encryption:
+                await self._write_encrypted(field_name, value)
+            else:
+                await self._write_plain(field_name, value)
+            self.logger.info("Command sent: %s = %s", field_name, value)
+        except TimeoutError:
+            self.logger.error("BLE write timeout for %s", field_name)
+        except Exception as exc:
+            self.logger.error("Write error for %s: %s", field_name, exc)
+
+    async def _write_plain(self, field_name: str, value: Any) -> None:
+        ble_device = await BleakScanner.find_device_by_address(
+            self.bt_cfg["address"], timeout=5
+        )
+        if ble_device is None:
+            self.logger.error("Device not found for write")
+            return
+        client = await establish_connection(
+            BleakClientWithServiceCache,
+            ble_device,
+            ble_device.name or "AC70",
+            max_attempts=5,
+        )
+        if not client.is_connected:
+            self.logger.error("BLE connection failed for write")
+            return
+        writer = DeviceWriter(client, self.bluetti_device, lock=self.lock)
+        await writer.write(field_name, value)
+        await asyncio.sleep(3)
+        await client.disconnect()
+
+    async def _write_encrypted(self, field_name: str, value: Any) -> None:
+        """Send a write command through an encrypted BLE session (mirrors DeviceReader handshake)."""
+        command = self.bluetti_device.build_write_command(field_name, value)
+        if command is None:
+            self.logger.error("Cannot build write command for %s", field_name)
+            return
+
+        async with self.lock:
             ble_device = await BleakScanner.find_device_by_address(
                 self.bt_cfg["address"], timeout=5
             )
             if ble_device is None:
-                self.logger.error("Device not found for write")
+                self.logger.error("Device not found for encrypted write")
                 return
-
             client = await establish_connection(
                 BleakClientWithServiceCache,
                 ble_device,
@@ -395,21 +451,46 @@ class BluettiBridge:
                 max_attempts=5,
             )
             if not client.is_connected:
-                self.logger.error("BLE connection failed for write")
+                self.logger.error("BLE connection failed for encrypted write")
                 return
 
-            writer = DeviceWriter(client, self.bluetti_device, lock=self.lock)
-            async with asyncio.timeout(15):
-                await writer.write(field_name, value)
-                await asyncio.sleep(3)  # Wait for device to apply the change
+            enc = BluettiEncryption()
 
-            await client.disconnect()
-            self.logger.info("Command sent: %s = %s", field_name, value)
+            async def _handler(_, data: bytearray) -> None:
+                msg = Message(bytes(data))
+                if msg.is_pre_key_exchange:
+                    msg.verify_checksum()
+                    if msg.type == MessageType.CHALLENGE:
+                        await client.write_gatt_char(WRITE_UUID, enc.msg_challenge(msg))
+                    return
+                if enc.unsecure_aes_key is None:
+                    return
+                key, iv = enc.getKeyIv()
+                dmsg = Message(enc.aes_decrypt(bytes(data), key, iv))
+                if dmsg.is_pre_key_exchange:
+                    dmsg.verify_checksum()
+                    if dmsg.type == MessageType.PEER_PUBKEY:
+                        await client.write_gatt_char(WRITE_UUID, enc.msg_peer_pubkey(dmsg))
+                    elif dmsg.type == MessageType.PUBKEY_ACCEPTED:
+                        enc.msg_key_accepted(dmsg)
 
-        except TimeoutError:
-            self.logger.error("BLE write timeout for %s", field_name)
-        except Exception as exc:
-            self.logger.error("Write error for %s: %s", field_name, exc)
+            try:
+                async with asyncio.timeout(30):
+                    await client.start_notify(NOTIFY_UUID, _handler)
+                    while not enc.is_ready_for_commands:
+                        await asyncio.sleep(0.5)
+                    encrypted_cmd = enc.aes_encrypt(
+                        bytes(command), enc.secure_aes_key, None
+                    )
+                    await client.write_gatt_char(WRITE_UUID, encrypted_cmd)
+                    await asyncio.sleep(3)
+            finally:
+                try:
+                    await client.stop_notify(NOTIFY_UUID)
+                except Exception:
+                    pass
+                await client.disconnect()
+                enc.reset()
 
     # ── MQTT command handler ───────────────────────
 
