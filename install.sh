@@ -42,6 +42,11 @@ echo "✅ Dependencies installed"
 mkdir -p "$LOGS_DIR"
 
 # ── 5. Check configuration ────────────────────────────
+if [ ! -f "$SCRIPT_DIR/config.yaml" ]; then
+    echo "📄 Creating config.yaml from template..."
+    cp "$SCRIPT_DIR/config.example.yaml" "$SCRIPT_DIR/config.yaml"
+fi
+
 if grep -q "XXXXXXXX" "$SCRIPT_DIR/config.yaml"; then
     echo ""
     echo "⚠️  WARNING: AC70 Bluetooth address is not configured yet."

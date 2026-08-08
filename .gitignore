@@ -14,7 +14,9 @@ logs/
 .DS_Store
 
 # Secrets — never commit your config with real credentials
-# config.yaml is tracked as a template (with placeholder values)
+# config.yaml holds real values locally and must never be tracked.
+# config.example.yaml is the tracked placeholder template.
+config.yaml
 
 # Claude Code internal settings
 .claude/
