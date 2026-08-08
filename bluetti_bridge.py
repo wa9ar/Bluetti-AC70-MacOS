@@ -366,6 +366,12 @@ class BluettiBridge:
             self._reader = self._make_reader()
         try:
             data = await self._reader.read()
+            if data is None:
+                # bluetti_bt_lib swallows internal BLE errors and returns
+                # None instead of raising — treat that the same as an
+                # exception so the failure counter (and hard-restart
+                # threshold below) actually accumulates.
+                raise RuntimeError("DeviceReader.read() returned no data")
             self._consecutive_failures = 0
             return data
         except Exception as exc:
